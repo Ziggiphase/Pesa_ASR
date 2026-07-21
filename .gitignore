@@ -1,0 +1,12 @@
+# Virtual environment
+agentpesa/
+
+# Environment variables / secrets
+.env
+
+# Python cache files
+__pycache__/
+*.pyc
+
+# Gradio cache
+.gradio/
