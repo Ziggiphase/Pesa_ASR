@@ -1,10 +1,10 @@
 import gradio as gr
-import torch
-from transformers import pipeline
 import os
 import shutil
 from openai import OpenAI
 from dotenv import load_dotenv
+from faster_whisper import WhisperModel
+
 
 # Load environment variables from .env file
 load_dotenv()
@@ -22,86 +22,84 @@ if not shutil.which("ffmpeg"):
                     print(f"Added FFmpeg to PATH dynamically from: {bin_dir}")
                     break
 
-HF_TOKEN = os.environ.get("HF_TOKEN", "")  # needed for NCAIR (gated model)
 
 import gc
 
-# Global storage for the currently loaded model to optimize RAM (lazy loading)
 current_pipeline = {"name": None, "pipe": None}
 
 def load_asr_pipeline(model_choice):
     global current_pipeline
-    
+
     model_mapping = {
-        "NCAIR Yoruba": ("NCAIR1/Yoruba-ASR", HF_TOKEN),
-        "NCAIR Igbo": ("NCAIR1/Igbo-ASR", HF_TOKEN),
-        "NCAIR Hausa": ("NCAIR1/Hausa-ASR", HF_TOKEN),
-        "LyngualLabs Yoruba (Code-Switched)": ("LyngualLabs/whisper-small-yoruba", None)
+        "NCAIR Yoruba": "./yoruba",
+        "NCAIR Igbo": "./igbo",
+        "NCAIR Hausa": "./hausa",
+        "LyngualLabs Yoruba (Code-Switched)": "./codeswitched"
     }
-    
+
     if model_choice not in model_mapping:
         raise ValueError(f"Unknown model choice: {model_choice}")
-        
-    model_id, token = model_mapping[model_choice]
-    
-    # If the requested model is already loaded, reuse it
+
+    model_id = model_mapping[model_choice]
+
     if current_pipeline["name"] == model_choice:
-        return current_pipeline["pipe"]
-        
-    # Free memory of the previously loaded model to stay within droplet RAM limits
+        return current_pipeline["pipe"]  # Return the existing pipeline if the same model is selected
+
     if current_pipeline["pipe"] is not None:
-        print(f"Unloading previous model ({current_pipeline['name']}) to free memory...")
+        print(f"Unloading the previous model: {current_pipeline['name']} to free memory")
         del current_pipeline["pipe"]
         current_pipeline["pipe"] = None
         current_pipeline["name"] = None
-        gc.collect()
-        if torch.cuda.is_available():
-            torch.cuda.empty_cache()
-            
-    print(f"Loading {model_choice} model ({model_id})...")
-    
-    # Dynamically select device and precision (CPU does not support float16 for many operations)
-    if torch.cuda.is_available():
-        device = 0
-        torch_dtype = torch.float16
-    else:
-        device = -1
-        torch_dtype = torch.float32
-        
-    pipe = pipeline(
-        "automatic-speech-recognition",
-        model=model_id,
-        token=token,
-        torch_dtype=torch_dtype,
-        device=device
+        gc.collect()  # Force garbage collection
+    print(f"Loading the {model_choice} model ({model_id})...")
+
+
+    pipe  = WhisperModel(
+        model_id,
+        device = "cpu",
+        compute_type = "int8"
     )
-    
+
     current_pipeline["name"] = model_choice
     current_pipeline["pipe"] = pipe
-    print(f"Model {model_choice} loaded successfully!")
+    print(f"Loaded the {model_choice} model successfully.")
     return pipe
 
-OPENAI_KEY = os.environ.get("OPENAI_API_KEY", "")
+OPENAI_API_KEY = os.environ.get("OPENAI_API_KEY", "")
 
 def transcribe_audio(audio_path, model_choice):
     if audio_path is None:
-        return "Please record or upload audio first."
-    
+        return "Please record or upload an audio file first."
+
     try:
         pipe = load_asr_pipeline(model_choice)
-        result = pipe(audio_path)
-        return result["text"]
+        if model_choice == "NCAIR Yoruba":
+            language = "yo"
+        elif model_choice == "NCAIR Igbo":
+            language = "ig"
+        elif model_choice == "NCAIR Hausa":
+            language = "ha"
+        elif model_choice == "LyngualLabs Yoruba (Code-Switched)":
+            language = "yo"
+        else:
+            return "Unsupported model choice."
+        result, _ = pipe.transcribe(audio_path, language=language, beam_size=5)
+        text = ""
+        for words in result:
+            texts = words.text
+            text += texts
+        return text
     except Exception as e:
         return f"Error during transcription: {str(e)}"
 
 def translate_text(text, model_choice):
     if not text.strip():
-        return "Nothing to translate yet."
-    if not OPENAI_KEY:
-        return "⚠️ No OpenAI key set yet. Add one to enable translation (see Step 6 below)."
+        return "No text to translate. Please transcribe audio first."
+    if not OPENAI_API_KEY:
+        return "OpenAI API key is not set. Please set the OPENAI_API_KEY environment variable."
 
-    client = OpenAI(api_key=OPENAI_KEY)
-    
+    client = OpenAI(api_key=OPENAI_API_KEY)
+
     if model_choice == "NCAIR Yoruba":
         lang = "Yoruba"
     elif model_choice == "NCAIR Igbo":
@@ -109,7 +107,7 @@ def translate_text(text, model_choice):
     elif model_choice == "NCAIR Hausa":
         lang = "Hausa"
     else:
-        lang = "Yoruba-English code-switched"
+        lang = "Yoruba-English Code Switched"
 
     response = client.chat.completions.create(
         model="gpt-4o-mini",
@@ -119,6 +117,7 @@ def translate_text(text, model_choice):
         ]
     )
     return response.choices[0].message.content.strip()
+
 
 with gr.Blocks(title="AgentPesa ASR — Local Test") as demo:
     gr.Markdown("# 🎙️ AgentPesa ASR — Local Tester")
@@ -150,5 +149,5 @@ with gr.Blocks(title="AgentPesa ASR — Local Test") as demo:
         translation_box2 = gr.Textbox(label="English Translation")
         translate_btn2.click(translate_text, [text_input, model_choice], translation_box2)
 
-#demo.launch(server_name="0.0.0.0", server_port=7860)
 demo.launch()
+#demo.launch(server_name="0.0.0.0", server_port=7860)
